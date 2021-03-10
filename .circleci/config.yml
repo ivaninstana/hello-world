@@ -168,7 +168,7 @@ examples:
                                   ]
                                 }
                         - run: echo "Do a lot of release"
-            workflow:
+            workflows:
                 build_and_release_payment_service:
                     jobs:
                         - build_payment_service
