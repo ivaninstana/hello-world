@@ -1,40 +1,177 @@
-version: '2.1'
-orbs:
-  pipeline-feedback: instana/pipeline-feedback@1.1
+# This code is licensed from CircleCI to the user under the MIT license.
+# See here for details: https://circleci.com/developer/orbs/licensing
+version: 2.1
+description: |
+    Create Instana Pipeline Feedback releases from your CircleCI workflows.
+display:
+    home_url: https://www.instana.com/docs
+    source_url: https://www.github.com/instana/pipeline-feedback-orb
+commands:
+    create_release:
+        description: |
+            Create a new Pipeline Feedback release in Instana.
+        parameters:
+            api_token:
+                default: INSTANA_API_TOKEN
+                description: |
+                    The name of the environment variable that contains a valid API token with the "Configuration of releases" permissions.
+                type: env_var_name
+            endpoint:
+                default: INSTANA_ENDPOINT_URL
+                description: |
+                    The name of the environment variable that contains the URL of your Instana tenant unit, e.g.: https://apm-awesome.instana.io. For self-managed (a.k.a., on-premise) setups, you can also add the port to use, e.g.: https://instana.awesome.com:1444.
+                type: env_var_name
+            release_name:
+                description: The name of this release in Instana.
+                type: string
+            release_scope:
+                default: '{}'
+                description: |
+                    JSON-encoded scoping information for the release. If not provided, the release will be marked as global to your tenant unit.
+                type: string
+        steps:
+            - run:
+                command: |-
+                    #!/bin/bash
+
+                    set -x
+                    set -eo pipefail
+
+                    function create_release() {
+                        missing_dependencies=false
+
+                        if ! which curl; then
+                            echo 'Missing dependency: The curl command is not available'
+                            missing_dependencies=true
+                        fi
+
+                        if ! which jq; then
+                            echo 'Missing dependency: The jq command is not available'
+                            missing_dependencies=true
+                        fi
+
+                        if [ ${missing_dependencies} == true ]; then
+                            echo 'Missing dependencies detected, aborting'
+                            exit 1
+                        fi
+
+                        if which envsubst; then
+                            release_name=$(echo "${INSTANA_RELEASE_NAME}" | envsubst)
+                        else
+                            echo 'The envsubst command is not available, skipping the interpolation of environment variables in the release name'
+
+                            release_name="${INSTANA_RELEASE_NAME}"
+                        fi
+
+                        echo "Creating release '${release_name}'"
+
+                        if [ -z "${INSTANA_RELEASE_SCOPE}" ]; then
+                            INSTANA_RELEASE_SCOPE='{}'
+                        fi
+
+                        echo "${INSTANA_RELEASE_SCOPE}" > scope.json
+
+                        if ! OUTPUT=$(jq empty scope.json 2>&1); then
+                            echo "Scope JSON is valid: ${OUTPUT}"
+                            exit 1
+                        fi
+
+                        curl --location --request POST "${!INSTANA_ENDPOINT_URL_NAME}/api/releases" \
+                            --silent \
+                            --fail \
+                            --show-error \
+                            --header "Authorization: apiToken ${!INSTANA_API_TOKEN_NAME}" \
+                            --header "Content-Type: application/json" \
+                            --data "{
+                        \"name\": \"${release_name}\",
+                        \"start\": $(date +%s)000,
+                        \"applications\": $(jq -r '.applications' < scope.json),
+                        \"services\": $(jq -r '.services' < scope.json)
+                    }" | jq -r ".id" | xargs -I {} echo "New release created with id {}"
+                    }
+
+                    create_release
+                environment:
+                    INSTANA_API_TOKEN_NAME: <<parameters.api_token>>
+                    INSTANA_ENDPOINT_URL_NAME: <<parameters.endpoint>>
+                    INSTANA_RELEASE_NAME: <<parameters.release_name>>
+                    INSTANA_RELEASE_SCOPE: <<parameters.release_scope>>
+                name: Create new release
 jobs:
-  build_payment_service:
-    docker:
-      - image: 'cimg/node:lts'
-    steps:
-      - run: echo Build
-  release_payment_service:
-    docker:
-      - image: 'instana/pipeline-feedback-orb-executor:latest'
-    steps:
-      - pipeline-feedback/create_release:
-          release_name: 'My Awesome App release (CircleCI: ${CIRCLE_JOB}/${CIRCLE_BUILD_NUM})'
-          release_scope: |
-            {
-              "applications": [
-                { "name": "My Awesome App" }
-              ],
-              "services": [
-                { "name": "Cool service #1" },
-                {
-                  "name": "Cool service #2",
-                  "scopedTo": {
-                    "applications": [
-                      { "name": "My Cool App" }
-                    ]
-                  }
-                }
-              ]
-            }
-      - run: echo "Do a lot of release"
-workflows:
-  build_and_release_payment_service:
-    jobs:
-      - build_payment_service
-      - release_payment_service:
-          requires:
-            - build_payment_service
+    create_release:
+        description: |
+            Create a new Pipeline Feedback release in Instana.
+        docker:
+            - image: <<parameters.executor_image>>
+        parameters:
+            api_token:
+                default: INSTANA_API_TOKEN
+                description: |
+                    The name of the environment variable that contains a valid API token with the "Configuration of releases" permissions.
+                type: env_var_name
+            endpoint:
+                default: INSTANA_ENDPOINT_URL
+                description: |
+                    The name of the environment variable that contains the URL of your Instana tenant unit, e.g.: https://apm-awesome.instana.io. For self-managed (a.k.a. on-premise) setups, you can also add the port to use, e.g.: https://instana.awesome.com:1444.
+                type: env_var_name
+            executor_image:
+                default: instana/pipeline-feedback-orb-executor:latest
+                type: string
+            release_name:
+                description: The name of this release in Instana.
+                type: string
+            release_scope:
+                default: '{}'
+                description: JSON-encoded scoping information for the release. If not provided, the release will be marked as global to your tenant unit.
+                type: string
+        steps:
+            - create_release:
+                api_token: << parameters.api_token >>
+                endpoint: << parameters.endpoint >>
+                release_name: << parameters.release_name >>
+                release_scope: << parameters.release_scope >>
+examples:
+    create_release:
+        description: |
+            The sample usage of the Instana Pipeline Feedback CircleCI Orb shows a workflow that includes the build and release of an application. Before the release is performed, data about the upcoming release is submitted to Instana, including CircleCI data like the build identifier and build number in the release name to be displayed in Instana. In the example, the release in Instana is scoped to the `My Awesome App` Application Perspective and, additionally, two services, `Cool service #1` and `Cool service #2`.
+        usage:
+            version: "2.1"
+            orbs:
+                pipeline-feedback: instana/pipeline-feedback@1.1
+            jobs:
+                build_payment_service:
+                    docker:
+                        - image: cimg/node:lts
+                    steps:
+                        - run: echo Build
+                release_payment_service:
+                    docker:
+                        - image: instana/pipeline-feedback-orb-executor:latest
+                    steps:
+                        - pipeline-feedback/create_release:
+                            release_name: 'My Awesome App release (CircleCI: ${CIRCLE_JOB}/${CIRCLE_BUILD_NUM})'
+                            release_scope: |
+                                {
+                                  "applications": [
+                                    { "name": "My Awesome App" }
+                                  ],
+                                  "services": [
+                                    { "name": "Cool service #1" },
+                                    {
+                                      "name": "Cool service #2",
+                                      "scopedTo": {
+                                        "applications": [
+                                          { "name": "My Cool App" }
+                                        ]
+                                      }
+                                    }
+                                  ]
+                                }
+                        - run: echo "Do a lot of release"
+            workflows:
+                build_and_release_payment_service:
+                    jobs:
+                        - build_payment_service
+                        - release_payment_service:
+                            requires:
+                                - build_payment_service
