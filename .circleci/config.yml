@@ -1,118 +1,40 @@
-version: 2.1
-
+version: '2.1'
 orbs:
-  pipeline-feedback: instana/pipeline-feedback@1.1.2
-
+  pipeline-feedback: instana/pipeline-feedback@1.1
 jobs:
-  deploy:
-    machine:
-      enabled: true
+  build_payment_service:
+    docker:
+      - image: 'cimg/node:lts'
     steps:
-
-      - checkout
-
-      - run:
-          name: Installing dependencies
-          command: |
-            echo "installing kubectl"
-            curl -LO https://storage.googleapis.com/kubernetes-release/release/v1.17.0/bin/linux/amd64/kubectl
-            chmod +x ./kubectl
-            sudo mv ./kubectl /usr/local/bin/kubectl
-            echo " installing Helm v3"
-            curl -LO https://get.helm.sh/helm-v3.0.2-linux-amd64.tar.gz
-            tar -zxf helm-v3.0.2-linux-amd64.tar.gz
-            chmod +x linux-amd64/helm
-            sudo mv linux-amd64/helm /usr/local/bin/helm
-            pip install --upgrade awscli
-            aws --version
-            kubectl version --client
-            helm version
-
-      - run:
-         name: aws configure
-         command: |
-            region="us-east-1"
-            cluster_name=`echo $CIRCLE_BRANCH| cut -d/ -f1`
-            tenant=`echo $CIRCLE_BRANCH| cut -d/ -f2`
-            env=`echo $CIRCLE_BRANCH| cut -d/ -f3`
-            namespace=$tenant-$env
-            aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
-            aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
-            aws configure set default.region $region
-            aws sts get-caller-identity
-            aws eks --region $region update-kubeconfig --name $cluster_name
-
-      - run:
-         name: k8s helm charts install/upgrade 
-         command: |
-            region="us-east-1"
-            cluster_name=`echo $CIRCLE_BRANCH| cut -d/ -f1`
-            tenant=`echo $CIRCLE_BRANCH| cut -d/ -f2`
-            env=`echo $CIRCLE_BRANCH| cut -d/ -f3`
-            namespace=$tenant-$env
-            kubectl get ns
-            kubectl delete -n $namespace -f jobs/mutable_init.yaml || true
-            for x in ` cat components_names `;
-            do 
-                
-                y=` echo $x | tr -d "[:digit:].." | sed 's/.$//' ` ;
-                v=` echo $x | tr -d "[:alpha:]-" ` ;
-                echo "Installing $y version $v"
-                helm -n $namespace upgrade -i $y --values components/$y"_values.yaml" --version $v upkeep/$y ;
-                kubectl -n $namespace rollout restart deployment/$y
-            done
-            kubectl apply -n $namespace -f jobs/mutable_init.yaml
-            helm -n $namespace list
-            kubectl -n $namespace get jobs
-  release:
+      - run: echo Build
+  release_payment_service:
     docker:
       - image: 'instana/pipeline-feedback-orb-executor:latest'
     steps:
       - pipeline-feedback/create_release:
-          release_name: 'nonprod-upkeep-dave (CircleCI: ${CIRCLE_JOB}/${CIRCLE_BUILD_NUM})'
+          release_name: 'My Awesome App release (CircleCI: ${CIRCLE_JOB}/${CIRCLE_BUILD_NUM})'
           release_scope: |
             {
               "applications": [
-                { "name": "nonprod-upkeep-dave" }
+                { "name": "My Awesome App" }
               ],
               "services": [
-                { "name": "angular-web-app",
-                  "scopedTo": {
-                    "applications": [
-                      { "name": "nonprod-upkeep-dave" }
-                    ]
-                  }
-                },
+                { "name": "Cool service #1" },
                 {
-                  "name": "integration-service",
+                  "name": "Cool service #2",
                   "scopedTo": {
                     "applications": [
-                      { "name": "nonprod-upkeep-dave" }
+                      { "name": "My Cool App" }
                     ]
                   }
                 }
               ]
             }
-      - run: echo "Releasing nonprod-upkeep-dave"
-
-
-workflows: 
-  version: 2.1
-  build-and-deploy:
+      - run: echo "Do a lot of release"
+workflows:
+  build_and_release_payment_service:
     jobs:
-      - deploy:
-          filters:
-            branches:
-              only:
-                - nonprod/upkeep/dave
-              ignore:
-                - master
-      - release:
+      - build_payment_service
+      - release_payment_service:
           requires:
-            - deploy
-          filters:
-            branches:
-              only:
-                - nonprod/upkeep/dave
-              ignore:
-                - master
+            - build_payment_service
