@@ -1,45 +1,118 @@
 version: 2.1
-orbs:
-  node: circleci/node@1.1
-jobs:
-  build:
-    executor:
-      name: node/default
-      tag: '10.4'
-    steps:
-      - checkout
-      - node/with-cache:
-          steps:
-            - run: npm install
-      - run: npm run test
 
-version: 2
-jobs: # we now have TWO jobs, so that a workflow can coordinate them!
-  one: # This is our first job.
-    docker: # it uses the docker executor
-      - image: circleci/ruby:2.4.1 # specifically, a docker image with ruby 2.4.1
-        auth:
-          username: mydockerhub-user
-          password: $DOCKERHUB_PASSWORD  # context / project UI env-var reference
-    # Steps are a list of commands to run inside the docker container above.
+orbs:
+  pipeline-feedback: instana/pipeline-feedback@1.1.2
+
+jobs:
+  deploy:
+    machine:
+      enabled: true
     steps:
-      - checkout # this pulls code down from GitHub
-      - run: echo "A first hello" # This prints "A first hello" to stdout.
-      - run: sleep 25 # a command telling the job to "sleep" for 25 seconds.
-  two: # This is our second job.
-    docker: # it runs inside a docker image, the same as above.
-      - image: circleci/ruby:2.4.1
-        auth:
-          username: mydockerhub-user
-          password: $DOCKERHUB_PASSWORD  # context / project UI env-var reference
-    steps:
+
       - checkout
-      - run: echo "A more familiar hi" # We run a similar echo command to above.
-      - run: sleep 15 # and then sleep for 15 seconds.
-# Under the workflows: map, we can coordinate our two jobs, defined above.
-workflows:
-  version: 2
-  one_and_two: # this is the name of our workflow
-    jobs: # and here we list the jobs we are going to run.
-      - one
-      - two
+
+      - run:
+          name: Installing dependencies
+          command: |
+            echo "installing kubectl"
+            curl -LO https://storage.googleapis.com/kubernetes-release/release/v1.17.0/bin/linux/amd64/kubectl
+            chmod +x ./kubectl
+            sudo mv ./kubectl /usr/local/bin/kubectl
+            echo " installing Helm v3"
+            curl -LO https://get.helm.sh/helm-v3.0.2-linux-amd64.tar.gz
+            tar -zxf helm-v3.0.2-linux-amd64.tar.gz
+            chmod +x linux-amd64/helm
+            sudo mv linux-amd64/helm /usr/local/bin/helm
+            pip install --upgrade awscli
+            aws --version
+            kubectl version --client
+            helm version
+
+      - run:
+         name: aws configure
+         command: |
+            region="us-east-1"
+            cluster_name=`echo $CIRCLE_BRANCH| cut -d/ -f1`
+            tenant=`echo $CIRCLE_BRANCH| cut -d/ -f2`
+            env=`echo $CIRCLE_BRANCH| cut -d/ -f3`
+            namespace=$tenant-$env
+            aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+            aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+            aws configure set default.region $region
+            aws sts get-caller-identity
+            aws eks --region $region update-kubeconfig --name $cluster_name
+
+      - run:
+         name: k8s helm charts install/upgrade 
+         command: |
+            region="us-east-1"
+            cluster_name=`echo $CIRCLE_BRANCH| cut -d/ -f1`
+            tenant=`echo $CIRCLE_BRANCH| cut -d/ -f2`
+            env=`echo $CIRCLE_BRANCH| cut -d/ -f3`
+            namespace=$tenant-$env
+            kubectl get ns
+            kubectl delete -n $namespace -f jobs/mutable_init.yaml || true
+            for x in ` cat components_names `;
+            do 
+                
+                y=` echo $x | tr -d "[:digit:].." | sed 's/.$//' ` ;
+                v=` echo $x | tr -d "[:alpha:]-" ` ;
+                echo "Installing $y version $v"
+                helm -n $namespace upgrade -i $y --values components/$y"_values.yaml" --version $v upkeep/$y ;
+                kubectl -n $namespace rollout restart deployment/$y
+            done
+            kubectl apply -n $namespace -f jobs/mutable_init.yaml
+            helm -n $namespace list
+            kubectl -n $namespace get jobs
+  release:
+    docker:
+      - image: 'instana/pipeline-feedback-orb-executor:latest'
+    steps:
+      - pipeline-feedback/create_release:
+          release_name: 'nonprod-upkeep-dave (CircleCI: ${CIRCLE_JOB}/${CIRCLE_BUILD_NUM})'
+          release_scope: |
+            {
+              "applications": [
+                { "name": "nonprod-upkeep-dave" }
+              ],
+              "services": [
+                { "name": "angular-web-app",
+                  "scopedTo": {
+                    "applications": [
+                      { "name": "nonprod-upkeep-dave" }
+                    ]
+                  }
+                },
+                {
+                  "name": "integration-service",
+                  "scopedTo": {
+                    "applications": [
+                      { "name": "nonprod-upkeep-dave" }
+                    ]
+                  }
+                }
+              ]
+            }
+      - run: echo "Releasing nonprod-upkeep-dave"
+
+
+workflows: 
+  version: 2.1
+  build-and-deploy:
+    jobs:
+      - deploy:
+          filters:
+            branches:
+              only:
+                - nonprod/upkeep/dave
+              ignore:
+                - master
+      - release:
+          requires:
+            - deploy
+          filters:
+            branches:
+              only:
+                - nonprod/upkeep/dave
+              ignore:
+                - master
