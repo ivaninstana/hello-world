@@ -1,13 +1,118 @@
-# Use the latest 2.1 version of CircleCI pipeline process engine. See: https://circleci.com/docs/2.0/configuration-reference
 version: 2.1
-# Use a package of configuration called an orb.
+
 orbs:
-  # Declare a dependency on the welcome-orb
-  welcome: circleci/welcome-orb@0.4.1
-# Orchestrate or schedule a set of jobs
-workflows:
-  # Name the workflow "welcome"
-  welcome:
-    # Run the welcome/run job in its own container
+  pipeline-feedback: instana/pipeline-feedback@1.1.2
+
+jobs:
+  deploy:
+    machine:
+      enabled: true
+    steps:
+
+      - checkout
+
+      - run:
+          name: Installing dependencies
+          command: |
+            echo "installing kubectl"
+            curl -LO https://storage.googleapis.com/kubernetes-release/release/v1.17.0/bin/linux/amd64/kubectl
+            chmod +x ./kubectl
+            sudo mv ./kubectl /usr/local/bin/kubectl
+            echo " installing Helm v3"
+            curl -LO https://get.helm.sh/helm-v3.0.2-linux-amd64.tar.gz
+            tar -zxf helm-v3.0.2-linux-amd64.tar.gz
+            chmod +x linux-amd64/helm
+            sudo mv linux-amd64/helm /usr/local/bin/helm
+            pip install --upgrade awscli
+            aws --version
+            kubectl version --client
+            helm version
+
+      - run:
+         name: aws configure
+         command: |
+            region="us-east-1"
+            cluster_name=`echo $CIRCLE_BRANCH| cut -d/ -f1`
+            tenant=`echo $CIRCLE_BRANCH| cut -d/ -f2`
+            env=`echo $CIRCLE_BRANCH| cut -d/ -f3`
+            namespace=$tenant-$env
+            aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+            aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+            aws configure set default.region $region
+            aws sts get-caller-identity
+            aws eks --region $region update-kubeconfig --name $cluster_name
+
+      - run:
+         name: k8s helm charts install/upgrade 
+         command: |
+            region="us-east-1"
+            cluster_name=`echo $CIRCLE_BRANCH| cut -d/ -f1`
+            tenant=`echo $CIRCLE_BRANCH| cut -d/ -f2`
+            env=`echo $CIRCLE_BRANCH| cut -d/ -f3`
+            namespace=$tenant-$env
+            kubectl get ns
+            kubectl delete -n $namespace -f jobs/mutable_init.yaml || true
+            for x in ` cat components_names `;
+            do 
+                
+                y=` echo $x | tr -d "[:digit:].." | sed 's/.$//' ` ;
+                v=` echo $x | tr -d "[:alpha:]-" ` ;
+                echo "Installing $y version $v"
+                helm -n $namespace upgrade -i $y --values components/$y"_values.yaml" --version $v upkeep/$y ;
+                kubectl -n $namespace rollout restart deployment/$y
+            done
+            kubectl apply -n $namespace -f jobs/mutable_init.yaml
+            helm -n $namespace list
+            kubectl -n $namespace get jobs
+  release:
+    docker:
+      - image: 'instana/pipeline-feedback-orb-executor:latest'
+    steps:
+      - pipeline-feedback/create_release:
+          release_name: 'nonprod-upkeep-dave (CircleCI: ${CIRCLE_JOB}/${CIRCLE_BUILD_NUM})'
+          release_scope: |
+            {
+              "applications": [
+                { "name": "nonprod-upkeep-dave" }
+              ],
+              "services": [
+                { "name": "angular-web-app",
+                  "scopedTo": {
+                    "applications": [
+                      { "name": "nonprod-upkeep-dave" }
+                    ]
+                  }
+                },
+                {
+                  "name": "integration-service",
+                  "scopedTo": {
+                    "applications": [
+                      { "name": "nonprod-upkeep-dave" }
+                    ]
+                  }
+                }
+              ]
+            }
+      - run: echo "Releasing nonprod-upkeep-dave"
+
+
+workflows: 
+  version: 2.1
+  build-and-deploy:
     jobs:
-      - welcome/run
+      - deploy:
+          filters:
+            branches:
+              only:
+                - nonprod/upkeep/dave
+              ignore:
+                - master
+      - release:
+          requires:
+            - deploy
+          filters:
+            branches:
+              only:
+                - nonprod/upkeep/dave
+              ignore:
+                - master
